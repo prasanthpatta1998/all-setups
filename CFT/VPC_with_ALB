@@ -1,0 +1,346 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: High-availability VPC with Auto Scaling Group, ALB, and Isolated Web Servers
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Web Autoscaling Group Configuration"
+        Parameters:
+          - WebAsgMin
+          - WebAsgDesired
+          - WebAsgMax
+    ParameterLabels:
+      WebAsgMin:
+        default: "Minimum Instances in Autoscaling Group"
+      WebAsgDesired:
+        default: "Desired Instances in Autoscaling Group"
+      WebAsgMax:
+        default: "Maximum Instances in Autoscaling Group"
+
+Mappings:
+  # AMI IDs and instance types selected according to the stack's AWS Region.
+  # Each AMI must exist and be usable in its listed Region.
+  RegionMap:
+    us-east-1:
+      AMI: ami-0ddc798b3f1a5117e
+      InstanceType: t2.micro
+    ap-southeast-1:
+      AMI: ami-0ef1a6822965893ba
+      InstanceType: t2.micro
+    ca-central-1:
+      AMI: ami-074c42dd5ddb28c14
+      InstanceType: t2.micro
+    ap-south-1:
+      AMI: ami-08e3b3155fc937a94
+      InstanceType: t3.micro
+    ap-south-2:
+      AMI: ami-06a3dc84cf2fde367
+      InstanceType: t3.micro
+
+Parameters:
+  # These values control the Auto Scaling Group capacity. Desired must be
+  # greater than or equal to Min and less than or equal to Max.
+  WebAsgMin:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+    Description: Specifies the minimum number of EC2 instances (1-10).
+
+  WebAsgDesired:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+    Description: Specifies the desired number of EC2 instances (1-10).
+
+  WebAsgMax:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 10
+    Description: Specifies the maximum number of EC2 instances (1-10).
+
+Resources:
+  # Create the VPC and divide its CIDR range into public and private subnets
+  # across two Availability Zones for workload separation and availability.
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/22
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: TM-VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/25
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: TM-PublicSubnet1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.128/25
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: TM-PublicSubnet2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/25
+      AvailabilityZone: !Select [ 0, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: TM-PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.128/25
+      AvailabilityZone: !Select [ 1, !GetAZs '' ]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: TM-PrivateSubnet2
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: TM-InternetGateway
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public route table sends internet-bound traffic through the Internet Gateway.
+  PublicRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: TM-PublicRouteTable
+
+  # Private subnets use this route table to reach the internet through NAT.
+  PrivateRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: TM-PrivateRouteTable
+
+  PublicRTDefaultIPV4Route:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRT
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  RTAssociationPublicSubnet1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRT
+
+  RTAssociationPublicSubnet2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRT
+
+  RTAssociationPrivateSubnet1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRT
+
+  RTAssociationPrivateSubnet2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRT
+
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      ConnectivityType: public
+
+  # A single NAT Gateway serves both private subnets; it is a single-AZ
+  # dependency and may incur cross-AZ traffic charges for the second subnet.
+  PrivateRTDefaultIPV4Route:
+    Type: AWS::EC2::Route
+    DependsOn: NATGateway
+    Properties:
+      RouteTableId: !Ref PrivateRT
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  # Public-facing security group: allow HTTP from the internet to the ALB.
+  # Add an HTTPS rule and listener if serving encrypted traffic.
+  LoadBalancerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inbound HTTP from the internet to ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: TM-ALB-SG
+
+  # Instance security group: permit HTTP only from the load balancer security group.
+  WebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP traffic ONLY from the ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref LoadBalancerSG
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: TM-WebServer-SG
+
+  WebLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        # Use the RegionMap values and permit web traffic only from the ALB.
+        ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMI]
+        InstanceType: !FindInMap [RegionMap, !Ref "AWS::Region", InstanceType]
+        SecurityGroupIds:
+          - !Ref WebServerSG
+        UserData:
+          Fn::Base64: |
+            # Install and start Apache, then write a simple test page.
+            #!/bin/bash
+            dnf update -y || yum update -y
+            dnf install -y httpd || yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            echo "<h1>Website Deployed Successfully</h1>" > /var/www/html/index.html
+
+  ASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      # Launch web instances into private subnets in both Availability Zones.
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebLaunchTemplate
+        Version: !GetAtt WebLaunchTemplate.LatestVersionNumber
+      MinSize: !Ref WebAsgMin
+      MaxSize: !Ref WebAsgMax
+      DesiredCapacity: !Ref WebAsgDesired
+      Tags:
+        - Key: Name
+          Value: TM-WebInstance
+          PropagateAtLaunch: true
+      # Register instances with the target group and replace unhealthy instances.
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      TargetGroupARNs:
+        - !Ref ALBTG
+
+  ALBTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      # The ALB checks the root page over HTTP and routes traffic to healthy instances.
+      Name: TM-Web-TG
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: '80'
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      Matcher:
+        HttpCode: '200'
+      TargetType: instance
+
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      # Internet-facing ALB spans both public subnets.
+      Name: TM-Application-LB
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref LoadBalancerSG
+      Tags:
+        - Key: Name
+          Value: TM-ALB
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      # Forward incoming HTTP requests to the web instance target group.
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTG
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+
+  R53HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: example.com
+      HostedZoneConfig:
+        Comment: "Hosted zone for example.com"
+      Alias:
+        - Name: !GetAtt ALB.DNSName
+          HostedZoneId: !GetAtt ALB.CanonicalHostedZoneID
+          EvaluateTargetHealth: true
+
+Outputs:
+  # Convenient URL for opening the website after the stack is created.
+  WebsiteURL:
+    Description: Public URL of the Application Load Balancer
+    Value: !Sub "http://${ALB.DNSName}"
