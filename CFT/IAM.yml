@@ -1,0 +1,130 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CloudFormation template to create EC2 instances with IAM roles and policies.
+
+Mappings:
+  # Select an AMI, instance type, and existing EC2 key pair for each supported Region.
+  # The AMI ID and key pair name must be valid in the Region where the stack is deployed.
+  RegionMap:
+    ap-south-1:
+      AMI: ami-08e3b3155fc937a94
+      InstType: t2.micro
+      keyname: aws-keypair
+    ap-south-2:
+      AMI: ami-06a3dc84cf2fde367  
+      InstType: t3.micro
+      keyname: vpc2-keypair
+
+Resources:
+  # Create three IAM users with service-specific AWS managed permissions.
+  IAMUser1:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: DevUser1
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ExpressFullAccess
+
+  IAMUser2:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: DevUser2
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+  
+  IAMUser3:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: DevUser3
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+  # Group permissions are shared with all users added below.
+  IAMGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: DevGroup
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+        - !Ref ManagedPolicy
+        
+  # Add the three IAM users to DevGroup.
+  IAMUserToGroupAddition:
+    Type: AWS::IAM::UserToGroupAddition
+    Properties:
+      GroupName: !Ref IAMGroup
+      Users:
+        - !Ref IAMUser1
+        - !Ref IAMUser2
+        - !Ref IAMUser3
+
+  # Custom policy granting selected read/write operations across S3, EC2, and DynamoDB.
+  ManagedPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: DevPermissions
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetObject
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - ec2:DescribeInstances
+              - ec2:StartInstances
+              - ec2:StopInstances
+            Resource: "*"
+          - Effect: Allow
+            Action:
+              - dynamodb:ListTables
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+            Resource: "*"
+  
+  # Role trusted by EC2; its permissions are made available to instances through a profile.
+  # The wildcard actions/resources are broad and should be narrowed for production use.
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: DevRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Policies:
+        - PolicyName: DevRolePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:*
+                  - ec2:*
+                  - dynamodb:*
+                Resource: "*"
+
+  # EC2 instances use an instance profile to assume the IAMRole above.
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: DevInstanceProfile
+      Roles:
+        - !Ref IAMRole
+  
+  # Launch an EC2 instance using the RegionMap values, attached role profile, and key pair.
+  # The selected key pair must already exist in the deployment Region.
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !FindInMap [RegionMap, !Ref "AWS::Region", InstType]
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AMI]  
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: !FindInMap [RegionMap, !Ref "AWS::Region", keyname]
